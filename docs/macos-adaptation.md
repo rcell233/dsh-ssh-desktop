@@ -62,12 +62,12 @@ DMG 安装、通知授权或睡眠行为正确；后文单独记录 Mac CI 和�
   - 修正 `.app/Contents/Resources` 路径；完整打包 core、插件 tarball、图标、LICENSE 和 NOTICE。
   - 插件每次打包生成最新 tarball，避免版本号未变时复用旧代码。
   - 区分 ad-hoc 本地签名与 Developer ID 签名/Apple notarization，默认不发布 release。
-- [ ] 9. 自动验证与 CI。
+- [x] 9. 自动验证与 CI。
   - 跑原有三个包全部测试，记录基线及适配后的结果。
   - 新增平台行为和打包回归验证；Electron smoke 保留 cookie、bridge 和安全边界检查。
   - Mac 双架构原生 runner 安装、测试、打包并保留构建产物；保留 Windows 回归。
   - 验证实际 .app 架构、Info.plist、打包资源与签名，不以“脚本成功退出”代替产物检查。
-- [ ] 10. 文档与交付。
+- [x] 10. 文档与交付。
   - README 写明 Mac 安装、CPU 选择、SSH/Keychain/agent、Finder PATH、开发/打包、数据与日志目录。
   - 记录 macOS 原生验收步骤、完成证据与剩余限制。
   - 将适配提交推送到个人 fork，提供仓库、提交及可用的 CI/产物链接。
@@ -141,8 +141,24 @@ Mac 实机确认系统事件与 SSH 连接恢复，不能仅靠模拟事件宣�
 - 2026-10-14：已创建个人 fork 并配置 remotes；完成首次静态审计并建立 TODO。
 - `b042921`：分析与 TODO 已先行提交并推送。
 - `c2815b2`：完成第 2–8 项实现，推送个人 fork 并启动三平台 CI。
-- 最终本地共 234 项命名检查通过：core 136、desktop 54、server-plugin 44；包含平台 API、Mac 菜单/preload、打包参数、builder schema 与真实 Electron smoke。
+- 本地原有及新增共 236 项命名检查通过：core 136、desktop 56、server-plugin 44；包含平台 API、Mac 菜单/preload、打包参数、builder schema 与真实 Electron smoke。
 - 原有 start-script 测试失败已定位为测试误调用开发机 systemd 用户服务，改为确定性的测试 stub 后通过；没有修改远端 DSH 协议。
 - 首轮本地与三平台 CI 暴露了窗口关闭回调重复清理 WebContents 导致的退出挂起；修复后，Linux/WSL 的 `DSH_SSH_DESKTOP_REQUIRE_ELECTRON=1 xvfb-run -a pnpm test` 全部通过，Chromium sandbox 保持启用。
 - SSH 就绪回执除模拟子进程竞争测试外，已用独立本地 sshd、临时密钥实测端到端转发；未读取或修改用户真实 SSH 配置和密钥。
-- 原生 CI：[首次运行](https://github.com/rcell233/dsh-ssh-desktop/actions/runs/38485979154)，首轮退出问题已修复；最终构建结果待回填。
+- `b5c2eb3`：修复退出重复清理与 SSH 端口竞争；Mac arm64/x64 和 Windows 原生测试通过。
+- `8a919c0`：修复真实构建发现的工具缓存 ESM/CommonJS 冲突与 Windows ASAR 文件路径分隔符问题，补充可执行回归测试。
+- 最终代码构建：[GitHub Actions 38486742182](https://github.com/rcell233/dsh-ssh-desktop/actions/runs/38486742182)，Windows x64、macOS arm64、macOS x64 全部测试、打包、产物校验及上传通过。
+
+## 构建产物与剩余验收
+
+产物来自代码提交 `8a919c0`，版本号沿用上游 `0.1.0`。Actions artifacts 保留 14 天，需要登录 GitHub 下载；过期后可以在个人 fork 重新运行工作流。
+
+| 平台 | 原生验证 | 下载 |
+|---|---|---|
+| macOS Apple Silicon / arm64 | 测试、DMG + ZIP、Mach-O 架构、Info.plist、ICNS、asar 与插件资源、codesign、hdiutil、ZIP 全部通过 | [DMG + ZIP](https://github.com/rcell233/dsh-ssh-desktop/actions/runs/38486742182/artifacts/11859863646) |
+| macOS Intel / x64 | 与 arm64 相同的原生测试及打包校验全部通过 | [DMG + ZIP](https://github.com/rcell233/dsh-ssh-desktop/actions/runs/38486742182/artifacts/11860420275) |
+| Windows / x64 | 测试、NSIS、安装程序与资源检查全部通过 | [EXE](https://github.com/rcell233/dsh-ssh-desktop/actions/runs/38486742182/artifacts/11860102379) |
+
+**验证边界：** 原生 CI 的 Electron smoke 在源码开发模式下验证真实窗口、认证、cookie、bridge 和正常退出；构建步骤另外检查打包产物。尚未人工拖拽安装、使用 Finder 验收最终 `.app`，也未连接你的实际服务器。上方实机清单保持未勾选。
+
+**正式分发：** 默认 Mac 包只有 ad-hoc 签名，`codesign` 校验通过不代表已通过 Gatekeeper 或 Apple 公证。Developer ID 签名/公证入口已实现，但当前没有使用 Apple 凭据执行；系统通知授权与通知点击、专注模式、真实合盖唤醒、第三方 agent 仍需在你的 Mac 上验收。

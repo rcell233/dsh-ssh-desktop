@@ -37,7 +37,7 @@
   </tr>
 </table>
 
-*截图中的服务器名和地址均为示例。*
+*以上为原 Windows 版本截图，服务器名和地址均为示例。Mac 使用系统原生标题栏与屏幕顶部菜单。*
 
 ## 安装
 
@@ -48,7 +48,7 @@
 
 要求 **macOS 13 Ventura 或更新版本**。Apple Silicon（M 系列）选择 `arm64`，Intel Mac 选择 `x64`；在「 → 关于本机」确认芯片类型。
 
-1. 从本 fork 的 [GitHub Actions](https://github.com/rcell233/dsh-ssh-desktop/actions/workflows/build.yml) 成功构建中下载对应架构的产物，或按下方命令在 Mac 上自行打包。下载 Actions 产物需要登录 GitHub，产物保留 14 天；过期后可重新运行工作流或自行打包。
+1. 已验证构建的下载入口见 [构建产物表](docs/macos-adaptation.md#构建产物与剩余验收)。也可从本 fork 的 [GitHub Actions](https://github.com/rcell233/dsh-ssh-desktop/actions/workflows/build.yml) 成功构建中下载对应架构的产物，或按下方命令在 Mac 上自行打包。下载 Actions 产物需要登录 GitHub，产物保留 14 天；过期后可重新运行工作流或自行打包。
 2. 打开 `DSH-SSH-Desktop-<版本>-mac-<架构>.dmg`，将 **DSH SSH Desktop.app** 拖入 Applications，然后从 Applications 启动。ZIP 也可解压后把应用移到 Applications。
 3. 默认构建只有 **ad-hoc 本地签名**，没有 Apple Developer ID 签名或公证。若 Gatekeeper 拦截，确认来源可信后，在「系统设置 → 隐私与安全性」中按系统提示允许打开；不要关闭全局系统安全检查。面向普通用户分发的签名构建方式见下文。
 
