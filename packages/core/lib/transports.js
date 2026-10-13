@@ -394,9 +394,16 @@ export class SystemSshTransport {
     const occupied = await probeListener(actualLocal)
     if (cancelled()) throw new Error('the local forward was cancelled')
     if (occupied) throw new Error(`the local port 127.0.0.1:${String(actualLocal)} is already in use`)
+    const readyMarker = `DSH_FORWARD_READY_${randomBytes(16).toString('hex')}`
     const args = [
       '-N',
       '-o', 'ExitOnForwardFailure=yes',
+      // OpenSSH executes LocalCommand only after local forwards have bound.
+      // A private, per-child acknowledgement closes the race where another
+      // process grabs this port while SSH is still authenticating. Echo plus
+      // a hex nonce is valid in both POSIX shells and Windows cmd.exe.
+      '-o', 'PermitLocalCommand=yes',
+      '-o', `LocalCommand=echo ${readyMarker}`,
       // Loopback on both ends, pinned: the design depends on the forwarded
       // traffic arriving at the remote harness as a loopback request.
       '-L', `127.0.0.1:${String(actualLocal)}:127.0.0.1:${String(remotePort)}`,
@@ -410,12 +417,28 @@ export class SystemSshTransport {
 
     /** Text already relayed, so the poll below reports each line once. */
     let relayed = ''
-    const relayNew = () => {
+    let partialLine = ''
+    let diagnostics = ''
+    let acknowledged = false
+    const consumeLine = (raw) => {
+      const line = raw.trim()
+      if (line === readyMarker) { acknowledged = true; return }
+      // A user's LogLevel=DEBUG3 may also print the LocalCommand itself. Only
+      // its exact echo acknowledges readiness; neither form belongs in logs.
+      if (line === '' || line.includes(readyMarker)) return
+      diagnostics += `${line}\n`
+      onEvent?.(`ssh: ${line}`)
+    }
+    const relayNew = (final = false) => {
       const text = spawned.read()
-      if (text.length <= relayed.length) return
-      const fresh = text.slice(relayed.length)
-      relayed = text
-      for (const line of fresh.split(/\r?\n/)) if (line.trim() !== '') onEvent?.(`ssh: ${line.trim()}`)
+      if (text.length > relayed.length) {
+        partialLine += text.slice(relayed.length)
+        relayed = text
+        const lines = partialLine.split(/\r?\n/)
+        partialLine = lines.pop() ?? ''
+        for (const line of lines) consumeLine(line)
+      }
+      if (final && partialLine !== '') { consumeLine(partialLine); partialLine = '' }
     }
 
     let up = false
@@ -424,7 +447,7 @@ export class SystemSshTransport {
       if (failure !== undefined) return
       failure = error
       if (!up || this.forwarder !== child) return
-      relayNew()
+      relayNew(true)
       this.forwarder = undefined
       this.boundPort = undefined
       this.forwarderLog = undefined
@@ -435,7 +458,7 @@ export class SystemSshTransport {
     // error events, and an exit during startup must never be missed.
     child.on('error', failed)
     // Windows may keep the log locked until every child descriptor closes.
-    child.once('close', () => { relayNew(); spawned.cleanup() })
+    child.once('close', () => { relayNew(true); spawned.cleanup() })
     child.once('exit', (code, signal) => {
       failed(new Error(`the ssh forward exited (${signal === null ? `code ${String(code)}` : `signal ${signal}`})`))
     })
@@ -444,16 +467,16 @@ export class SystemSshTransport {
     while (Date.now() < deadline) {
       relayNew()
       if (!running()) break
-      if (await probeListener(actualLocal)) {
+      if (acknowledged && await probeListener(actualLocal)) {
         // Let pending child error/exit events run before announcing readiness.
         await new Promise((r) => setImmediate(r))
         if (running()) { up = true; break }
       }
       await new Promise((r) => setTimeout(r, 250))
     }
-    relayNew()
+    relayNew(!up)
     if (!up) {
-      const detail = cancelled() ? 'the local forward was cancelled' : [failure?.message, relayed.trim()].filter(Boolean).join(': ')
+      const detail = cancelled() ? 'the local forward was cancelled' : [failure?.message, diagnostics.trim()].filter(Boolean).join(': ')
       try { child.kill() } catch { /* gone */ }
       if (this.forwarder === child) {
         this.forwarder = undefined

@@ -56,7 +56,7 @@ macOS 通知需允许系统通知权限，事件行为还依赖应用签名。�
 
 ### Windows
 
-运行 `DSH-SSH-Desktop-Setup-<版本>.exe`。默认只为当前用户安装，不需要管理员权限，也可以在安装时更改安装位置。
+运行 `DSH-SSH-Desktop-Setup-<版本>-x64.exe`。默认只为当前用户安装，不需要管理员权限，也可以在安装时更改安装位置。
 
 安装包**没有数字签名**，第一次运行时 Windows SmartScreen 可能提示「Windows 已保护你的电脑」。点「更多信息」，再点「仍要运行」即可。
 
@@ -79,7 +79,7 @@ Host my-server
 对带口令的密钥，可先在 Mac Terminal 中运行 `/usr/bin/ssh-add --apple-use-keychain ~/.ssh/id_ed25519`，然后运行 `/usr/bin/ssh -o BatchMode=yes my-server true`。
 `UseKeychain` 是 Apple 系统 OpenSSH 扩展，因此应用固定使用 `/usr/bin/ssh`。第三方 SSH agent（例如密码管理器）可通过 `IdentityAgent` 指定 socket；应用保留系统继承的 `SSH_AUTH_SOCK`，不创建或替换你的 agent。[Apple OpenSSH 配置说明](https://developer.apple.com/library/archive/technotes/tn2449/_index.html)
 
-Finder 启动应用时不会执行 `.zshrc`。如果 `ProxyCommand` / `Match exec` 使用 Homebrew 等工具，请在 SSH 配置中写工具的**绝对路径**（例如 `/opt/homebrew/bin/cloudflared`），并确保这些工具也无需交互。应用会隔离 SSH 连接复用和后台启动设置，以便准确关闭自己创建的隧道，其他身份与跳板配置保持由 OpenSSH 解析。
+Finder 启动应用时不会执行 `.zshrc`。如果 `ProxyCommand` / `Match exec` 使用 Homebrew 等工具，请在 SSH 配置中写工具的**绝对路径**（例如 `/opt/homebrew/bin/cloudflared`），并确保这些工具也无需交互。应用会隔离 SSH 连接复用和后台启动设置，以便准确关闭自己创建的隧道，隧道进程的 `LocalCommand` 保留给内部就绪确认（应用会覆盖该项）；其他身份与跳板配置保持由 OpenSSH 解析。
 
 服务器目前仍要求 Linux；Mac 客户端并不表示一键安装支持 macOS 服务器。
 
@@ -95,7 +95,7 @@ Finder 启动应用时不会执行 `.zshrc`。如果 `ProxyCommand` / `Match exe
 在每台服务器的「连接设置」里选择：
 
 - **保持远端运行**（默认）：服务器上的 DSH 继续运行，下次打开应用直接接上，正在跑的任务不受影响。
-- **停止远端**：正常退出时停止服务器上的 DSH。如果应用被强制结束、崩溃或长时间断网，远端会在约 10 分钟后自行停止。这需要服务器上装有配套插件。选择该策略时，Mac 长时间合盖睡眠也会导致续租中断，约 10 分钟后远端可能停止；需要长时间后台跑任务时选择「保持远端运行」。
+- **停止远端**：正常退出时停止服务器上的 DSH。如果应用被强制结束、崩溃或长时间断网，远端会在约 10 分钟后自行停止。这需要配套插件已经连接并启用租约。选择该策略时，Mac 长时间合盖睡眠也会导致续租中断，最后一次续租后约 10 分钟远端可能停止；需要长时间后台跑任务时选择「保持远端运行」。
 
 ## 数据与日志
 

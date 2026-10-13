@@ -146,10 +146,10 @@ async function freePort() {
 }
 
 const fixture = fileURLToPath(new URL('./fixtures/fake-ssh.js', import.meta.url))
-function testTransport(mode = 'ready') {
+function testTransport(mode = 'ready', readyTimeoutMs = 2_000) {
   const children = []
   const transport = new SystemSshTransport(/** @type {any} */ ({ target: mode }), {
-    readyTimeoutMs: 2_000,
+    readyTimeoutMs,
     spawn: (_command, args, options) => {
       const child = spawn(process.execPath, [fixture, ...args], options)
       children.push(child)
@@ -187,6 +187,52 @@ await check('an asynchronous spawn error rejects the forward without crashing th
   try {
     await assert.rejects(transport.startTunnel(port, port), /ENOENT/)
     assert.equal(transport.forward, null)
+  } finally { transport.dispose() }
+})
+
+await check('a service that claims the port during SSH startup cannot be mistaken for the forward', async () => {
+  const port = await freePort()
+  const unrelated = createServer((socket) => socket.end())
+  const transport = new SystemSshTransport(/** @type {any} */ ({ target: 'wait' }), {
+    readyTimeoutMs: 400,
+    spawn: (_command, args, options) => {
+      // The preflight probe has already returned FREE; SSH never binds, but
+      // another local service becomes reachable while it is authenticating.
+      unrelated.listen(port, '127.0.0.1')
+      return spawn(process.execPath, [fixture, ...args], options)
+    },
+  })
+  try {
+    await assert.rejects(transport.startTunnel(port, port), /did not come up/)
+    assert.equal(transport.forward, null)
+    assert.equal(await probeListener(port), true, 'the unrelated listener was left alone')
+  } finally {
+    transport.dispose()
+    await new Promise((resolve) => unrelated.close(resolve))
+  }
+})
+
+await check('a listening child without its readiness acknowledgement times out', async () => {
+  const { transport, children } = testTransport('no-ack', 500)
+  const port = await freePort()
+  try {
+    await assert.rejects(transport.startTunnel(port, port), /did not come up/)
+    await until(() => children[0].exitCode !== null || children[0].signalCode !== null)
+    assert.equal(transport.forward, null)
+    assert.equal(await probeListener(port), false)
+  } finally { transport.dispose() }
+})
+
+await check('a split acknowledgement is consumed privately and debug text cannot trigger it', async () => {
+  const { transport } = testTransport('fragmented-ack')
+  const port = await freePort()
+  const events = []
+  const started = Date.now()
+  try {
+    await transport.startTunnel(port, port, (line) => events.push(line))
+    assert.ok(Date.now() - started >= 350, 'the echo must finish before readiness')
+    assert.doesNotMatch(events.join('\n'), /DSH_FORWARD_READY_|expanded LocalCommand/)
+    assert.match(events.join('\n'), /listening on 127\.0\.0\.1/)
   } finally { transport.dispose() }
 })
 

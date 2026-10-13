@@ -93,20 +93,34 @@ function launch() {
         FAKE_DSH_LOG: requestLog,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     })
     let output = ''
     child.stdout.on('data', (chunk) => { output += chunk })
     child.stderr.on('data', (chunk) => { output += chunk })
-    const timer = setTimeout(() => { child.kill('SIGKILL') }, 60_000)
-    child.on('error', (error) => {
+    let settled = false
+    const finish = (code) => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
-      resolve({ code: null, trace: [], output: `${output}\n${String(error)}` })
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
+      child.stdout.destroy()
+      child.stderr.destroy()
       const trace = output.split(/\r?\n/).filter((l) => l.startsWith('[smoke] ')).map((l) => l.slice(8))
       resolve({ code, trace, output })
-    })
+    }
+    const timer = setTimeout(() => {
+      output += '\nElectron smoke timed out after 60 seconds.\n'
+      if (process.platform === 'win32') {
+        // Include Chromium helpers; inherited output pipes can outlive the main child.
+        const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' })
+        killer.on('error', () => { child.kill('SIGKILL') })
+      } else {
+        try { process.kill(-child.pid, 'SIGKILL') } catch { child.kill('SIGKILL') }
+      }
+      finish(null)
+    }, 60_000)
+    child.on('error', (error) => { output += `\n${String(error)}`; finish(null) })
+    child.on('close', finish)
   })
 }
 

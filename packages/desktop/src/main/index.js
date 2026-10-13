@@ -473,8 +473,12 @@ function createMainWindow() {
   win.on('closed', () => {
     trace('main window closed')
     // WebContentsView contents have their own lifetime, even if the host dies.
-    remoteViews.closeAll()
-    if (managerView !== undefined && !managerView.webContents.isDestroyed()) managerView.webContents.close()
+    // A real quit already closed them in before-quit. Calling close twice while
+    // a WebContents is still being destroyed can stall Electron's native exit.
+    if (!quitting) {
+      remoteViews.closeAll()
+      if (managerView !== undefined && !managerView.webContents.isDestroyed()) managerView.webContents.close()
+    }
     mainWindow = undefined
     managerView = undefined
     managerOpen = false
@@ -565,7 +569,8 @@ function homeCaption() {
 function showHomeCaption() {
   const win = mainWindow
   if (win === undefined || win.isDestroyed()) return
-  if (process.platform !== 'darwin') win.setTitleBarOverlay({ ...homeCaption(), height: TITLEBAR_HEIGHT })
+  if (process.platform === 'darwin') win.setBackgroundColor(windowChrome(process.platform, nativeTheme.shouldUseDarkColors).backgroundColor)
+  else win.setTitleBarOverlay({ ...homeCaption(), height: TITLEBAR_HEIGHT })
   win.setTitle('DSH')
 }
 

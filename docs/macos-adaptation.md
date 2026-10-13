@@ -24,37 +24,38 @@ DMG 安装、通知授权或睡眠行为正确；后文单独记录 Mac CI 和�
 
 - [x] 0. 确认 GitHub 身份、创建个人 fork、保留 upstream 并切换 origin。
 - [x] 1. 审查 core / desktop / server-plugin / 打包脚本并记录本清单。
-- [ ] 2. 本机 SSH 与进程生命周期。
+- [x] 2. 本机 SSH 与进程生命周期。
   - macOS 优先使用系统 `/usr/bin/ssh`，兼容 Apple Keychain 配置，避免依赖 Finder 启动时的 PATH。
   - 检查 SSH 可用性，缺少客户端或启动失败应报告错误，不能使主进程崩溃。
+  - 隧道使用随机 LocalCommand 回执、监听探测与进程状态共同确认就绪，拒绝启动期间被其他程序抢占的端口；内部回执不写入用户日志。
   - 显式隔离用户 `ControlMaster` / `ControlPath` / `ControlPersist` 及后台启动设置，确保应用拥有并能终止端口转发进程。
   - 保留 `~/.ssh/config`、IdentityFile、ProxyJump、SSH_AUTH_SOCK；不读取密钥、不自动改用户 SSH 配置。
   - 补覆盖平台选择、参数与失败清理的回归测试。
-- [ ] 3. 窗口与标题栏。
+- [x] 3. 窗口与标题栏。
   - Mac 使用系统原生标题栏和左侧红黄绿按钮；Windows 保持现有自绘标题栏。
   - `backgroundMaterial: acrylic`、`setTitleBarOverlay` 等 API 按支持的平台调用。
   - Mac remote preload 只暴露现有受校验 bridge，不注入 Windows 标题栏属性、菜单和拖动区域。
   - 本地首页不再为 Mac 保留 Windows 标题栏空白；连接管理层尺寸与远端视图保持正确。
-- [ ] 4. macOS 菜单与键盘。
+- [x] 4. macOS 菜单与键盘。
   - 系统菜单提供应用/连接/编辑/显示/窗口，包含关于、隐藏、服务、退出等惯例。
   - 支持 Cmd+Q、Cmd+W、Cmd+C/V/X/A/Z、Cmd+Shift+Z、Cmd+R、开发者工具快捷键。
   - 菜单动作正确作用于当前远端页面或本地输入框，不能误刷新隐藏的首页。
   - 从系统菜单可打开连接管理、切换服务器、重连、重启和测试通知。
-- [ ] 5. Dock、菜单栏图标与生命周期。
+- [x] 5. Dock、菜单栏图标与生命周期。
   - Mac 图标使用 PNG/ICNS；菜单栏使用带 Retina 版本的单色 Template 图标。
   - 红色关闭按钮隐藏窗口并保持连接；Dock 点击、菜单栏和第二实例均可恢复。
   - Mac 关闭最后一个窗口不直接退出；真正退出仍执行 keep/stop 策略和超时清理。
   - Windows `displayBalloon` 限定 Windows；菜单栏图标异常不能让 Mac 无法返回窗口。
-- [ ] 6. 通知与未读角标。
+- [x] 6. 通知与未读角标。
   - Windows 保留任务栏 overlay；Mac 使用 Dock badge，避免调用 Windows 专用方法。
   - 清除未读时同步清除角标和注意提示；点击通知能激活对应连接。
   - 通知提示与故障文案区分系统；记录签名、系统通知权限、勿扰模式的验收条件。
-- [ ] 7. 开发环境与图标。
+- [x] 7. 开发环境与图标。
   - 提供 macOS/Linux shell 启动脚本和根目录 start 命令；清除继承的 ELECTRON_RUN_AS_NODE。
   - 固定兼容的 pnpm 版本，确保 Electron postinstall 被允许并实际安装运行时。
   - Node 最低版本与 Electron 依赖一致；无需运行 Windows runtime 复制脚本。
-  - 从现有品牌图标生成 Mac ICNS 和菜单栏模板图，保持现有版权声明。
-- [ ] 8. 打包。
+  - builder 从现有品牌 PNG 生成 Mac ICNS；新增可复现的终端字形菜单栏模板图，保持现有版权声明。
+- [x] 8. 打包。
   - 将平台/架构从硬编码 Windows x64 改为明确的构建参数，默认宿主平台/架构。
   - Mac 产物为 DMG + ZIP，文件名含版本与架构，避免双架构覆盖。
   - 仅在平台/架构一致时复用本机 Electron；跨架构下载对应运行时。
@@ -111,11 +112,17 @@ Mac 实机确认系统事件与 SSH 连接恢复，不能仅靠模拟事件宣�
 - [Electron BrowserWindow 平台 API](https://www.electronjs.org/docs/latest/api/browser-window)
 - [Electron 菜单角色和 macOS 约定](https://www.electronjs.org/docs/latest/api/menu-item)
 - [Electron 通知与签名要求](https://www.electronjs.org/docs/latest/tutorial/notifications)
-- [Electron 支持平台](https://www.electronjs.org/docs/latest/tutorial/support#supported-platforms)
-- [electron-builder macOS 配置](https://www.electron.build/mac.html)
-- [electron-builder 多平台构建](https://www.electron.build/multi-platform-build.html)
+- [Electron 44 的 macOS 13 最低要求](https://www.electronjs.org/blog/electron-44-0)
+- [electron-builder macOS 配置](https://www.electron.build/v26/docs/mac/)
+- [electron-builder 多平台构建](https://www.electron.build/docs/features/multi-platform-build/)
 
 ## 执行记录
 
 - 2026-10-14：已创建个人 fork 并配置 remotes；完成首次静态审计并建立 TODO。
-- 基线测试、实现验证、CI 结果：实施后补充。
+- `b042921`：分析与 TODO 已先行提交并推送。
+- `c2815b2`：完成第 2–8 项实现，推送个人 fork 并启动三平台 CI。
+- core 本地全套 133 项通过；平台 API、Mac 菜单/preload、打包参数及 builder schema 回归通过。
+- 原有 start-script 测试失败已定位为测试误调用开发机 systemd 用户服务，改为确定性的测试 stub 后通过；没有修改远端 DSH 协议。
+- 首轮本地与三平台 CI 暴露了窗口关闭回调重复清理 WebContents 导致的退出挂起；修复后，Linux/WSL 的 `DSH_SSH_DESKTOP_REQUIRE_ELECTRON=1 xvfb-run -a pnpm test` 全部通过，Chromium sandbox 保持启用。
+- SSH 就绪回执除模拟子进程竞争测试外，已用独立本地 sshd、临时密钥实测端到端转发；未读取或修改用户真实 SSH 配置和密钥。
+- 原生 CI：[首次运行](https://github.com/rcell233/dsh-ssh-desktop/actions/runs/38485979154)，首轮退出问题已修复；最终构建结果待回填。

@@ -46,6 +46,7 @@ jobs:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: node -e "const fs=require('node:fs'); const assert=require('node:assert/strict'); assert.equal(process.arch,process.env.EXPECTED_ARCH); assert.ok(fs.existsSync(require('electron')));"
       - name: Test with the Chromium sandbox enabled
+        timeout-minutes: 5
         run: pnpm test
       - name: Build installers (Mac uses ad-hoc signatures, without notarization)
         run: pnpm package:${{ matrix.platform }} --arch ${{ matrix.arch }}
