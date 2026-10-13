@@ -94,6 +94,25 @@ Mac 实机确认系统事件与 SSH 连接恢复，不能仅靠模拟事件宣�
    Developer ID 和 notarization 需要维护者的 Apple 账号与证书，不能伪造或自动申请。
 6. Mac 通知、Dock、菜单栏外观、全屏、键盘焦点及睡眠恢复必须有原生验证。
 
+## 文件级改动索引
+
+| 文件/模块 | 实施内容 | 验证方式 |
+|---|---|---|
+| `packages/core/lib/transports.js` | 系统 SSH 选择、可执行检查、旧版 OpenSSH 能力检测、复用隔离、就绪回执、退出与取消竞争处理 | 平台参数测试、真实子进程竞争测试、独立 localhost sshd 转发 |
+| `packages/core/test/start-script.js` | 隔离测试机器的 systemd，保证预期远端脚本分支 | 实际执行 POSIX shell 的 secret 环境传递测试 |
+| `desktop/src/main/platform.js` | 标题栏选项、关闭窗口策略、通知帮助的平台决策 | Darwin/Windows/Linux 分支测试 |
+| `desktop/src/main/index.js` | Dock 激活、隐藏/退出、托盘模板图、按平台调用窗口 API、菜单状态刷新、单次视图清理 | 原生 Electron 两次启动与退出 smoke；实机交互清单 |
+| `desktop/src/main/attention.js` | Mac Dock badge、原生通知图标策略、跨连接未读聚合/清零 | 平台 mock 严格拒绝错误 API；原生 smoke 的 badge bridge |
+| `desktop/src/main/menus.js`、`remote-views.js` | 原生系统菜单、Command 快捷键、manager/远端/弹窗焦点路由、防快捷键递归 | 菜单与 WebContents 输入事件回归；Mac 原生启动 |
+| `desktop/src/preload/`、`renderer/` | Mac 不注入 Windows caption；受信平台样式、系统字体、跨平台文案 | preload bridge 回归、实际 Chromium 样式计算与 smoke |
+| `desktop/scripts/package.mjs`、`package-config.mjs` | 平台/架构构建、全新插件、asar/资源/许可证完整性、ad-hoc/正式签名参数 | 配置 schema 与参数测试；原生构建产物校验 |
+| `desktop/scripts/start.mjs`、`start-desktop.sh` | 清除 Electron Node 模式环境并启动 GUI | 隔离假运行时检查参数与环境继承 |
+| `desktop/scripts/make-tray-icon.mjs`、`assets/trayTemplate*.png` | 可复现的 18/36px 单色终端图标 | 生成脚本、打包资源检查；深浅菜单栏仍需实机目视检查 |
+| `.github/workflows/build.yml` | 两种 Mac 架构与 Windows 原生测试/构建/产物上传 | Actions 作业结果与 artifact |
+| `package.json`、`pnpm-workspace.yaml`、`.gitignore`、`README.md` | 固定开发工具版本、允许 Electron 安装脚本、开发/安装/SSH/签名说明 | 冻结锁文件安装、文档与 CLI 对照 |
+
+表中 `desktop/` 均指 `packages/desktop/`。服务端插件和连接存储格式没有变化，现有服务器配置和 cookie 可以继续使用。
+
 ## Mac 实机验收（待执行）
 
 - [ ] arm64 与 x64 分别从 DMG 拖入 Applications 并从 Finder 启动；不依赖终端 PATH。
@@ -115,13 +134,14 @@ Mac 实机确认系统事件与 SSH 连接恢复，不能仅靠模拟事件宣�
 - [Electron 44 的 macOS 13 最低要求](https://www.electronjs.org/blog/electron-44-0)
 - [electron-builder macOS 配置](https://www.electron.build/v26/docs/mac/)
 - [electron-builder 多平台构建](https://www.electron.build/docs/features/multi-platform-build/)
+- [OpenSSH 8.6：先验证端口转发，再执行 LocalCommand](https://github.com/openssh/openssh-portable/blob/V_8_6_P1/ssh.c#L1998-L2070)
 
 ## 执行记录
 
 - 2026-10-14：已创建个人 fork 并配置 remotes；完成首次静态审计并建立 TODO。
 - `b042921`：分析与 TODO 已先行提交并推送。
 - `c2815b2`：完成第 2–8 项实现，推送个人 fork 并启动三平台 CI。
-- core 本地全套 133 项通过；平台 API、Mac 菜单/preload、打包参数及 builder schema 回归通过。
+- 最终本地共 234 项命名检查通过：core 136、desktop 54、server-plugin 44；包含平台 API、Mac 菜单/preload、打包参数、builder schema 与真实 Electron smoke。
 - 原有 start-script 测试失败已定位为测试误调用开发机 systemd 用户服务，改为确定性的测试 stub 后通过；没有修改远端 DSH 协议。
 - 首轮本地与三平台 CI 暴露了窗口关闭回调重复清理 WebContents 导致的退出挂起；修复后，Linux/WSL 的 `DSH_SSH_DESKTOP_REQUIRE_ELECTRON=1 xvfb-run -a pnpm test` 全部通过，Chromium sandbox 保持启用。
 - SSH 就绪回执除模拟子进程竞争测试外，已用独立本地 sshd、临时密钥实测端到端转发；未读取或修改用户真实 SSH 配置和密钥。

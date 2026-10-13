@@ -8,6 +8,7 @@ import {
   HELP, PRODUCT_NAME, assertBuildHost, createBuildConfig, localElectronDist,
   macSigningOptions, parseBuildArgs, resourcesDirectory,
 } from './package-config.mjs'
+import { ensureBuilderCache, verifyArchiveFiles } from './package-support.mjs'
 
 const require = createRequire(import.meta.url)
 const desktop = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -24,6 +25,7 @@ async function main() {
   const core = join(repo, 'packages', 'core')
   const plugin = readJson(join(repo, 'packages', 'server-plugin', 'package.json'))
   process.env.ELECTRON_BUILDER_CACHE ??= join(repo, '.cache', 'electron-builder')
+  ensureBuilderCache(process.env.ELECTRON_BUILDER_CACHE)
   // Work around Windows Low integrity workspaces, without changing Mac TMPDIR.
   if (process.platform === 'win32') {
     const temp = join(repo, '.cache', 'tmp')
@@ -88,14 +90,15 @@ async function main() {
       const resources = resourcesDirectory(context.appOutDir, context.electronPlatformName, context.packager.appInfo.productFilename)
       rmSync(join(resources, 'default_app.asar'), { force: true })
       // Check the actual archive, including the manually staged core dependency.
-      for (const file of [manifest.main, 'node_modules/@dsh-ssh/core/lib/index.js', 'assets/trayTemplate.png', 'assets/trayTemplate@2x.png', 'LICENSE', 'NOTICE']) {
-        if (extractFile(join(resources, 'app.asar'), file).length === 0) throw new Error(`Empty packaged file: ${file}`)
-      }
+      verifyArchiveFiles(join(resources, 'app.asar'), [
+        manifest.main, 'node_modules/@dsh-ssh/core/lib/index.js',
+        'assets/trayTemplate.png', 'assets/trayTemplate@2x.png', 'LICENSE', 'NOTICE',
+      ], extractFile)
       if (!readFileSync(join(resources, `dsh-desktop-link-${String(plugin.version)}.tgz`)).equals(readFileSync(pluginFile))) {
         throw new Error('Packaged server plugin does not match the freshly built tarball.')
       }
     }
-    results.push(...await build({ targets: targetPlatform.createTarget(targetTypes, Arch[arch]), projectDir: stage, config }))
+    results.push(...await build({ targets: targetPlatform.createTarget(targetTypes, Arch[arch]), projectDir: stage, config, publish: 'never' }))
   }
   console.log('\nbuilt:')
   for (const file of results) console.log(`  ${file}`)

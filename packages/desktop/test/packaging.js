@@ -1,7 +1,11 @@
 /** Platform/architecture and release signing regressions; no macOS host required. */
 import { strict as assert } from 'node:assert'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { ensureBuilderCache, verifyArchiveFiles } from '../scripts/package-support.mjs'
 import {
   assertBuildHost, createBuildConfig, localElectronDist, macSigningOptions,
   parseBuildArgs, resourcesDirectory,
@@ -63,3 +67,37 @@ for (const [platform, signing] of [['darwin', macSigningOptions(false, {})], ['d
   assert.equal(config.extraResources[0].to, 'dsh-desktop-link-0.2.0.tgz')
 }
 console.log('ok   Mac and Windows configs pass the installed electron-builder schema')
+
+const scratch = mkdtempSync(join(tmpdir(), 'dsh-packaging-'))
+try {
+  writeFileSync(join(scratch, 'package.json'), '{"type":"module"}\n')
+  const cache = join(scratch, '.cache', 'builder')
+  ensureBuilderCache(cache)
+  const helper = join(cache, 'icon-tool.js')
+  writeFileSync(helper, 'require("node:fs"); process.stdout.write("commonjs works")\n')
+  const run = spawnSync(process.execPath, [helper], { encoding: 'utf8' })
+  assert.equal(run.status, 0, run.stderr)
+  assert.equal(run.stdout, 'commonjs works')
+  const customMetadata = '{"type":"commonjs","name":"custom-cache"}\n'
+  writeFileSync(join(cache, 'package.json'), customMetadata)
+  ensureBuilderCache(cache)
+  assert.equal(readFileSync(join(cache, 'package.json'), 'utf8'), customMetadata)
+  writeFileSync(join(cache, 'package.json'), '{"type":"module"}\n')
+  assert.throws(() => ensureBuilderCache(cache), /Choose a separate ELECTRON_BUILDER_CACHE/)
+  console.log('ok   downloaded CommonJS helpers run inside ESM workspaces without overwriting cache metadata')
+
+  const appBuilderRequire = createRequire(builderRequire.resolve('app-builder-lib'))
+  const { createPackage, extractFile } = appBuilderRequire('@electron/asar')
+  const source = join(scratch, 'source')
+  mkdirSync(join(source, 'src', 'main'), { recursive: true })
+  writeFileSync(join(source, 'src', 'main', 'index.js'), 'export const example = true\n')
+  writeFileSync(join(source, 'empty'), '')
+  const archive = join(scratch, 'app.asar')
+  await createPackage(source, archive)
+  verifyArchiveFiles(archive, ['src/main/index.js'], extractFile)
+  assert.throws(() => verifyArchiveFiles(archive, ['src/main/missing.js'], extractFile), /not found/)
+  assert.throws(() => verifyArchiveFiles(archive, ['empty'], extractFile), /Empty packaged file/)
+  console.log('ok   packaged file verification reads real ASAR archives with native path separators')
+} finally {
+  rmSync(scratch, { recursive: true, force: true })
+}
