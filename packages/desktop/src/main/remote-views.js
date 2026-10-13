@@ -14,7 +14,7 @@
  * tab would be and then some: no Node, sandboxed, context-isolated, navigation
  * pinned to the forward's origin, popups outside it sent to the user's browser,
  * and only the permissions in `policy.permissionAllowed`. Its preload draws the
- * Windows caption the way the official desktop does and exposes one thing to
+ * Windows caption outside macOS and exposes one thing to
  * the page: the `window.dshSshDesktop` bridge (notify, setBadge,
  * revealInEditor), every call of which is checked here.
  *
@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url'
 
 import { Menu, WebContentsView, session as electronSession, ipcMain, nativeTheme, shell } from 'electron'
 
-import { contextMenuItems, messages, popupAt, remoteEditItems } from './menus.js'
+import { contextMenuItems, editingShortcut, isEditingShortcut, messages, popupAt, remoteEditItems } from './menus.js'
 import {
   TITLEBAR_HEIGHT,
   badgeInput,
@@ -106,6 +106,8 @@ export class RemoteViews {
     this.active = undefined
     /** Partitions whose session handlers are installed (once per session). */
     this.configured = new Set()
+    /** Same-origin preview windows, whose editors also receive native menu commands. */
+    this.popupContents = new Set()
     this.#registerCaptionIpc()
     this.#registerBridgeIpc()
   }
@@ -188,6 +190,25 @@ export class RemoteViews {
     this.active = undefined
   }
 
+  /** Route native menu edits to a remote editor, without touching the manager. */
+  editFocused(contents, command) {
+    const entry = [...this.views.values()].find(({ view }) => view.webContents === contents)
+    if (entry === undefined && !this.popupContents.has(contents)) return false
+    const { keyCode, modifiers } = editingShortcut(command)
+    this.#sendEditingKey(contents, keyCode, modifiers)
+    return true
+  }
+
+  /** A reload of a managed view starts the existing 401 recovery state machine. */
+  reloadFocused(contents) {
+    const found = [...this.views].find(([, { view }]) => view.webContents === contents)
+    if (found !== undefined) {
+      this.load(found[0])
+      return true
+    }
+    return false
+  }
+
   /**
    * @param {string} id
    * @param {import('electron').BrowserWindow} host
@@ -224,20 +245,32 @@ export class RemoteViews {
     contents.on('page-title-updated', () => {
       if (this.active === id && !host.isDestroyed()) host.setTitle(this.#titleOf(entry))
     })
-    // The hidden application menu belongs to the window's own contents; the
-    // view handles its developer shortcuts itself.
+    this.#installShortcuts(contents, () => { this.load(id) })
+    return entry
+  }
+
+  /** Remote editors handle their own history, including native menu replays. */
+  #installShortcuts(contents, reload) {
     contents.on('before-input-event', (event, input) => {
+      // Ignoring only editing accelerators avoids recursive menu dispatch when
+      // a menu click sends Cmd+Z back into the editor. Other shortcuts (Cmd+Q,
+      // Cmd+W, etc.) continue through the native application menu normally.
+      if (process.platform === 'darwin') contents.setIgnoreMenuShortcuts(isEditingShortcut(input))
       if (input.type !== 'keyDown') return
       const key = input.key.toLowerCase()
-      if (key === 'f12' || (input.control && input.shift && key === 'i')) {
+      const developerShortcut = process.platform === 'darwin'
+        ? input.meta && input.alt && !input.control && !input.shift && key === 'i'
+        : input.control && input.shift && !input.meta && !input.alt && key === 'i'
+      const reloadShortcut = (process.platform === 'darwin' ? input.meta && !input.control : input.control && !input.meta)
+        && !input.shift && !input.alt && key === 'r'
+      if (key === 'f12' || developerShortcut) {
         event.preventDefault()
         contents.toggleDevTools()
-      } else if (key === 'f5' || (input.control && !input.shift && key === 'r')) {
+      } else if (key === 'f5' || reloadShortcut) {
         event.preventDefault()
-        this.load(id)
+        reload()
       }
     })
-    return entry
   }
 
   /** @param {RemoteView} entry */
@@ -249,6 +282,7 @@ export class RemoteViews {
 
   /** @param {RemoteView} entry */
   #applyCaption(entry) {
+    if (process.platform === 'darwin') return
     const host = this.host()
     if (host === undefined || host.isDestroyed()) return
     host.setTitleBarOverlay({ ...(entry.caption ?? fallbackCaption()), height: TITLEBAR_HEIGHT })
@@ -369,16 +403,34 @@ export class RemoteViews {
     const m = messages()
     return [
       { label: m.connections, click: () => { this.actions.openManager() } },
-      ...this.#switchItems(id),
-      { type: 'separator' },
-      { label: m.reloadPage, accelerator: 'Ctrl+R', registerAccelerator: false, click: () => { this.load(id) } },
-      { label: m.reconnect, click: () => { this.actions.reconnect(id) } },
-      { label: m.restartRemote, click: () => { this.actions.restart(id) } },
-      { type: 'separator' },
-      { label: m.testNotification, click: () => { this.actions.testNotification(id) } },
+      ...this.#connectionItems(id),
       { type: 'separator' },
       { label: m.about, click: () => { this.actions.about() } },
       { label: m.exit, click: () => { this.actions.quit() } },
+    ]
+  }
+
+  /** Native macOS connection menu, refreshed when the visible server changes. */
+  applicationItems() {
+    if (this.active === undefined) return this.showItems()
+    return [
+      { label: `${messages().currentServer}: ${this.views.get(this.active)?.name ?? this.active}`, enabled: false },
+      ...this.#connectionItems(this.active),
+    ]
+  }
+
+  /** Connection actions shared by the caption and macOS application menus. */
+  #connectionItems(id) {
+    const m = messages()
+    return [
+      ...this.#switchItems(id),
+      { type: 'separator' },
+      // macOS has one focused-content reload accelerator in the View menu.
+      { id: `${id}:reload`, label: m.reloadPage, ...(process.platform === 'darwin' ? {} : { accelerator: 'Ctrl+R', registerAccelerator: false }), click: () => { this.load(id) } },
+      { id: `${id}:reconnect`, label: m.reconnect, click: () => { this.actions.reconnect(id) } },
+      { id: `${id}:restart`, label: m.restartRemote, click: () => { this.actions.restart(id) } },
+      { type: 'separator' },
+      { id: `${id}:testNotification`, label: m.testNotification, click: () => { this.actions.testNotification(id) } },
     ]
   }
 
@@ -392,7 +444,7 @@ export class RemoteViews {
     if (others.length === 0) return []
     return [{
       label: messages().switchServer,
-      submenu: others.map((c) => ({ label: String(c.name), click: () => { this.open(c.id) } })),
+      submenu: others.map((c) => ({ id: `${c.id}:switch`, label: String(c.name), click: () => { this.open(c.id) } })),
     }]
   }
 
@@ -405,19 +457,22 @@ export class RemoteViews {
     const ready = this.manager.list().filter((c) => this.manager.snapshot(c.id).phase === 'ready')
     const m = messages()
     if (ready.length <= 1) {
-      return [{ label: m.openWindow, enabled: ready.length === 1, click: () => { if (ready[0] !== undefined) this.open(ready[0].id) } }]
+      return [{ id: `${ready[0]?.id ?? 'none'}:show`, label: m.openWindow, enabled: ready.length === 1, click: () => { if (ready[0] !== undefined) this.open(ready[0].id) } }]
     }
-    return [{ label: m.openWindow, submenu: ready.map((c) => ({ label: String(c.name), click: () => { this.open(c.id) } })) }]
+    return [{ label: m.openWindow, submenu: ready.map((c) => ({ id: `${c.id}:show`, label: String(c.name), click: () => { this.open(c.id) } })) }]
   }
 
   /**
    * Replay an editing shortcut into the page (upstream `sendEditingKey`).
    * @param {RemoteView} entry
    * @param {string} keyCode
-   * @param {Array<'control'>} modifiers
+   * @param {string[]} modifiers
    */
   #sendKey(entry, keyCode, modifiers) {
-    const contents = entry.view.webContents
+    this.#sendEditingKey(entry.view.webContents, keyCode, modifiers)
+  }
+
+  #sendEditingKey(contents, keyCode, modifiers) {
     if (contents.isDestroyed()) return
     contents.focus()
     contents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
@@ -489,6 +544,9 @@ export class RemoteViews {
     contents.on('did-create-window', (child) => {
       // Popups inherit the same rules; they have no auth state of their own.
       const childContents = child.webContents
+      this.popupContents.add(childContents)
+      childContents.once('destroyed', () => { this.popupContents.delete(childContents) })
+      this.#installShortcuts(childContents, () => { childContents.reload() })
       childContents.on('will-navigate', onNavigate)
       childContents.on('will-redirect', onNavigate)
       childContents.setWindowOpenHandler(({ url }) => {

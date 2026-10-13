@@ -1,0 +1,93 @@
+name: Desktop builds
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: mac
+            arch: arm64
+          - runner: macos-15-intel
+            platform: mac
+            arch: x64
+          - runner: windows-2022
+            platform: win
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      DSH_SSH_DESKTOP_REQUIRE_ELECTRON: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Install pinned dependencies and Electron runtime
+        run: pnpm install --frozen-lockfile
+      - name: Verify native runtime installation
+        working-directory: packages/desktop
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: node -e "const fs=require('node:fs'); const assert=require('node:assert/strict'); assert.equal(process.arch,process.env.EXPECTED_ARCH); assert.ok(fs.existsSync(require('electron')));"
+      - name: Test with the Chromium sandbox enabled
+        run: pnpm test
+      - name: Build installers (Mac uses ad-hoc signatures, without notarization)
+        run: pnpm package:${{ matrix.platform }} --arch ${{ matrix.arch }}
+      - name: Verify macOS bundle, architecture, signature, and disk image
+        if: matrix.platform == 'mac'
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          bundle_dir="dist/installer/mac"
+          if [ "$EXPECTED_ARCH" = arm64 ]; then bundle_dir="dist/installer/mac-arm64"; fi
+          app_bundle="$bundle_dir/DSH SSH Desktop.app"
+          plist="$app_bundle/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$plist")" = io.github.rcell233.dsh-ssh-desktop
+          test "$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$plist")" = 13.0.0
+          expected_macho="$EXPECTED_ARCH"
+          if [ "$EXPECTED_ARCH" = x64 ]; then expected_macho=x86_64; fi
+          test "$(lipo -archs "$app_bundle/Contents/MacOS/DSH SSH Desktop")" = "$expected_macho"
+          test -s "$app_bundle/Contents/Resources/icon.icns"
+          test -s "$app_bundle/Contents/Resources/app.asar"
+          test ! -e "$app_bundle/Contents/Resources/default_app.asar"
+          codesign --verify --deep --strict --verbose=2 "$app_bundle"
+          version=$(node -p "require('./packages/desktop/package.json').version")
+          hdiutil verify "dist/installer/DSH-SSH-Desktop-$version-mac-$EXPECTED_ARCH.dmg"
+          unzip -t "dist/installer/DSH-SSH-Desktop-$version-mac-$EXPECTED_ARCH.zip"
+      - name: Verify Windows installer
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $version = node -p "require('./packages/desktop/package.json').version"
+          $installer = Get-Item "dist/installer/DSH-SSH-Desktop-Setup-$version-x64.exe"
+          if ($installer.Length -lt 1MB) { throw 'Installer is missing or unexpectedly small' }
+          if (!(Test-Path 'dist/installer/win-unpacked/DSH SSH Desktop.exe')) { throw 'Packaged executable missing' }
+          if (Test-Path 'dist/installer/win-unpacked/resources/default_app.asar') { throw 'Electron sample app was retained' }
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-ssh-desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/installer/*.dmg
+            dist/installer/*.zip
+            dist/installer/*.exe

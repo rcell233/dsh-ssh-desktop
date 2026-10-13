@@ -45,7 +45,7 @@
           <section class="page" data-page="session">
             <h2 class="heading"><span id="session-name"></span> <span class="chip" id="chip" data-phase="idle">未连接</span></h2>
             <p class="intro" id="destination"></p>
-            <div class="banner" data-kind="warn" id="sandbox-warning" hidden>应用正以 --no-sandbox 运行：远端页面仍启用了上下文隔离、禁用了 Node，但没有进程沙箱。请改用 start-desktop.cmd 启动（首次先运行 setup-electron-runtime.cmd）。</div>
+            <div class="banner" data-kind="warn" id="sandbox-warning" hidden>应用正以 --no-sandbox 运行：远端页面仍启用了上下文隔离、禁用了 Node，但没有进程沙箱。请使用正常的桌面启动方式，不要添加 --no-sandbox 参数。</div>
             <p class="msg" id="message"></p>
             <div id="session-extra"></div>
             <div class="banner" id="note" hidden></div>
@@ -147,7 +147,7 @@
                 <input class="input mono narrow" name="localPort" inputmode="numeric">
               </label>
               <div class="row">
-                <span class="row-text"><span class="row-title" id="close-policy-title">退出应用时</span><span class="row-desc">关闭窗口后服务器上的 DSH 如何处理。</span></span>
+                <span class="row-text"><span class="row-title" id="close-policy-title">退出应用时</span><span class="row-desc">从菜单退出应用时如何处理服务器上的 DSH。关闭窗口只隐藏界面，连接继续运行。</span></span>
                 <!-- Holds the value for the form; connection.js draws DSH's selector pill and menu over it. -->
                 <select class="picker-source" name="closePolicy" aria-labelledby="close-policy-title">
                   <option value="keep">保持远端运行</option>
@@ -173,7 +173,7 @@
           <!-- 诊断日志 -->
           <section class="page page-fill" data-page="log" hidden>
             <h2 class="heading">诊断日志</h2>
-            <p class="intro">这台服务器本次运行的连接过程，同时写入日志文件（logs\main.log，保留约 2 MB）。启动链接里的令牌已隐去。<span class="mono" id="userdata"></span></p>
+            <p class="intro">这台服务器本次运行的连接过程，同时写入日志文件（logs/main.log，保留约 2 MB）。启动链接里的令牌已隐去。<span class="mono" id="userdata"></span></p>
             <div class="footer">
               <button type="button" class="btn small" id="btn-logs">打开日志目录</button>
               <button type="button" class="btn small" id="btn-userdata">打开数据目录</button>

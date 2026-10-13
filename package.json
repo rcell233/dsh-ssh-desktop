@@ -2,13 +2,18 @@
   "name": "dsh-ssh-desktop-workspace",
   "version": "0.0.0",
   "private": true,
-  "description": "A thin Windows desktop shell for a DSH that runs on a server over system ssh.",
+  "description": "A Windows and macOS desktop shell for a DSH that runs on a server over system ssh.",
   "type": "module",
   "scripts": {
-    "test": "pnpm -r test"
+    "start": "pnpm --filter dsh-ssh-desktop start",
+    "test": "pnpm -r test",
+    "package:mac": "pnpm --filter dsh-ssh-desktop run package --mac",
+    "package:win": "pnpm --filter dsh-ssh-desktop run package --win"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12.0",
+    "pnpm": "10.32.1"
   },
+  "packageManager": "pnpm@10.32.1",
   "license": "MIT"
 }

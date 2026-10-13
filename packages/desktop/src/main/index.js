@@ -36,6 +36,7 @@ import { FileLog } from './file-log.js'
 import { Installer } from './installer.js'
 import { TITLEBAR_HEIGHT, isConnectionWindowCaller, isMenuRequest, partitionFor } from './policy.js'
 import { RemoteViews } from './remote-views.js'
+import { hideOnClose, notificationHelp, windowChrome } from './platform.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const HOME_PAGE = join(here, '..', 'renderer', 'home.html')
@@ -45,9 +46,12 @@ const MANAGER_PAGE = join(here, '..', 'renderer', 'connection.html')
 const MANAGER_PAGE_URL = pathToFileURL(MANAGER_PAGE).href
 const MANAGER_PRELOAD = join(here, '..', 'preload', 'connection.cjs')
 /** The app icon (scripts/make-icon.mjs): the window, the taskbar and the dev Start Menu shortcut. */
-const APP_ICON = join(here, '..', '..', 'assets', 'icon.ico')
+const APP_ICON = join(here, '..', '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png')
+const TRAY_ICON = process.platform === 'darwin'
+  ? join(here, '..', '..', 'assets', 'trayTemplate.png')
+  : APP_ICON
 
-/** The app's data directory name under %APPDATA%. */
+/** The product's directory under the platform's application-data directory. */
 const DATA_DIR_NAME = 'DSH SSH Desktop'
 /** What builds up to 0.1.0 called it. */
 const LEGACY_DATA_DIR_NAME = 'dsh-ssh-desktop'
@@ -180,6 +184,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => { focusMainWindow() })
+  app.on('activate', () => { if (!quitting) focusMainWindow() })
   void app.whenReady().then(start)
 }
 
@@ -197,6 +202,7 @@ let mainWindow
 /** @type {WebContentsView | undefined} */
 let managerView
 let managerOpen = false
+let refreshApplicationMenu = () => {}
 
 async function start() {
   fileLog.write('app', `start: dsh-ssh-desktop ${app.getVersion()}${dev ? ' (development)' : ''} · Electron ${process.versions.electron} · ${process.platform} ${process.getSystemVersion()}`)
@@ -230,7 +236,14 @@ async function start() {
   })
   manager.on('task', (id, task) => { attention.task(id, nameOf(id), task) })
 
-  installApplicationMenu()
+  refreshApplicationMenu = installApplicationMenu({
+    openManager: () => { openManager() },
+    showMainWindow: () => { focusMainWindow() },
+    about: () => { showAbout() },
+    editRemote: (contents, command) => remoteViews?.editFocused(contents, command) ?? false,
+    reloadRemote: (contents) => remoteViews?.reloadFocused(contents) ?? false,
+    connectionItems: () => remoteViews?.applicationItems() ?? [],
+  })
   remoteViews = new RemoteViews({
     manager,
     host: () => mainWindow,
@@ -272,7 +285,11 @@ async function start() {
 
   registerIpc()
   createMainWindow()
-  if (!smoke) createTray()
+  if (!smoke) {
+    try { createTray() } catch (error) {
+      fileLog.write('app', `could not create the tray icon: ${String(error)}`)
+    }
+  }
   // Nothing on screen yet but the home page: start in the manager.
   openManager()
 
@@ -323,7 +340,8 @@ function registerNotificationIdentity() {
 
 // Closing the window hides it to the tray (see createMainWindow); quitting is
 // the tray's or the application menu's "退出", and runs the close policy.
-app.on('window-all-closed', () => { app.quit() })
+app.on('will-quit', () => { trace('will quit') })
+app.on('window-all-closed', () => { trace('windows closed'); if (process.platform !== 'darwin') app.quit() })
 
 /** Set once a real quit starts, so the window's close is let through. */
 let quitting = false
@@ -342,8 +360,12 @@ app.on('before-quit', (event) => {
   void Promise.race([manager.shutdownAll('the app is quitting'), timeout]).finally(() => {
     fileLog.write('app', 'exit')
     shutdownDone = true
+    trace('shutdown: dispose UI')
+    tray?.destroy()
+    tray = undefined
     remoteViews?.closeAll()
     if (managerView !== undefined && !managerView.webContents.isDestroyed()) managerView.webContents.close()
+    trace('shutdown: quit')
     app.quit()
   })
 })
@@ -356,6 +378,10 @@ app.on('web-contents-created', (_event, contents) => {
 // ------------------------------------------------------------------ main window
 
 function focusMainWindow() {
+  if ((mainWindow === undefined || mainWindow.isDestroyed()) && remoteViews !== undefined && !quitting) {
+    createMainWindow()
+    openManager()
+  }
   const win = mainWindow
   if (win === undefined || win.isDestroyed()) return
   if (win.isMinimized()) win.restore()
@@ -390,13 +416,7 @@ function createMainWindow() {
     title: 'DSH',
     icon: APP_ICON,
     show: !smoke || Boolean(capturePath),
-    // The official desktop's Windows caption: no system title bar, native
-    // caption buttons over a 40px overlay. Over the home page the overlay is
-    // transparent on acrylic; over a remote view it takes the DSH sidebar colour.
-    backgroundColor: '#00000000',
-    backgroundMaterial: 'acrylic',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: { ...homeCaption(), height: TITLEBAR_HEIGHT },
+    ...windowChrome(process.platform, nativeTheme.shouldUseDarkColors),
     webPreferences: {
       preload: HOME_PRELOAD,
       contextIsolation: true,
@@ -438,10 +458,10 @@ function createMainWindow() {
   win.on('focus', () => { markSeen() })
   // × hides to the tray: connections, forwards and notifications keep going.
   win.on('close', (event) => {
-    if (quitting || smoke || tray === undefined) return
+    if (!hideOnClose(process.platform, { quitting, smoke, hasTray: tray !== undefined })) return
     event.preventDefault()
     win.hide()
-    if (!trayHintShown) {
+    if (process.platform === 'win32' && tray !== undefined && !trayHintShown) {
       trayHintShown = true
       tray.displayBalloon({
         iconType: 'info',
@@ -451,8 +471,13 @@ function createMainWindow() {
     }
   })
   win.on('closed', () => {
+    trace('main window closed')
+    // WebContentsView contents have their own lifetime, even if the host dies.
+    remoteViews.closeAll()
+    if (managerView !== undefined && !managerView.webContents.isDestroyed()) managerView.webContents.close()
     mainWindow = undefined
     managerView = undefined
+    managerOpen = false
   })
 }
 
@@ -481,7 +506,9 @@ let trayHintShown = false
 
 /** The notification-area icon: bring the window back, or quit for real. */
 function createTray() {
-  tray = new Tray(nativeImage.createFromPath(APP_ICON))
+  const icon = nativeImage.createFromPath(TRAY_ICON)
+  if (process.platform === 'darwin') icon.setTemplateImage(true)
+  tray = new Tray(icon)
   tray.setToolTip('DSH SSH Desktop')
   tray.on('click', () => { focusMainWindow() })
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -538,7 +565,7 @@ function homeCaption() {
 function showHomeCaption() {
   const win = mainWindow
   if (win === undefined || win.isDestroyed()) return
-  win.setTitleBarOverlay({ ...homeCaption(), height: TITLEBAR_HEIGHT })
+  if (process.platform !== 'darwin') win.setTitleBarOverlay({ ...homeCaption(), height: TITLEBAR_HEIGHT })
   win.setTitle('DSH')
 }
 
@@ -578,7 +605,7 @@ async function confirmRestart(id) {
 }
 
 /**
- * Show a sample notification now, or say why Windows will not.
+ * Show a sample notification now, or explain the platform's requirements.
  * @param {string} id
  */
 function testNotification(id) {
@@ -588,7 +615,7 @@ function testNotification(id) {
     void (mainWindow === undefined ? dialog.showMessageBox(options) : dialog.showMessageBox(mainWindow, options))
   }
   const outcome = attention.test(id, name, (reason) => {
-    explain(`Windows 拒绝了通知：${reason}\n请在「设置 → 系统 → 通知」里确认通知已打开、没有开启勿扰，并允许「DSH SSH Desktop (dev)」发送通知。`)
+    explain(`系统拒绝了通知：${reason}\n${notificationHelp(process.platform, dev)}`)
   })
   if (outcome === 'unsupported') explain('这台电脑不支持系统通知。')
 }
@@ -695,6 +722,7 @@ function pushState() {
   if (pushTimer !== undefined) return
   pushTimer = setTimeout(() => {
     pushTimer = undefined
+    refreshApplicationMenu()
     const win = mainWindow
     if (win === undefined || win.isDestroyed()) return
     win.webContents.send('dsh-home:status', homeStatus())

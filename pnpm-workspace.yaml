@@ -1,8 +1,8 @@
 packages:
   - packages/*
 
-# Electron's postinstall downloads the platform binary; nothing else may run
-# install scripts.
+# Requires the pnpm 10.32.1 pinned in package.json. Electron's postinstall
+# downloads the host's platform/architecture binary; no other install scripts run.
 allowBuilds:
   electron: true
   # Only the Squirrel target uses it; the installer is NSIS.

@@ -2,11 +2,11 @@
   "name": "dsh-ssh-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "A thin Windows desktop shell for a DSH that runs on a server over system ssh.",
+  "description": "A Windows and macOS desktop shell for a DSH that runs on a server over system ssh.",
   "type": "module",
   "main": "src/main/index.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node scripts/start.mjs",
     "test": "node test/run.js",
     "icon": "electron scripts/make-icon.mjs",
     "package": "node scripts/package.mjs"

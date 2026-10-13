@@ -5,6 +5,11 @@
  */
 const { contextBridge, ipcRenderer } = require('electron')
 
+// A trusted local styling hint; no extra renderer privileges or IPC channels.
+const markPlatform = () => { document.documentElement.dataset.platform = process.platform }
+if (document.documentElement !== null) markPlatform()
+else window.addEventListener('DOMContentLoaded', markPlatform, { once: true })
+
 contextBridge.exposeInMainWorld('dshHome', {
   openManager: () => ipcRenderer.invoke('dsh-home:openManager'),
   showMenu: (name, x, y) => ipcRenderer.invoke('dsh-home:menu', name, x, y),

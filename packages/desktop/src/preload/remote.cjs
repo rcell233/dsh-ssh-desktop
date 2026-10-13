@@ -1,5 +1,6 @@
 /**
- * Preload for the remote window: the Windows caption, as the official DSH
+ * Preload for the remote window: the page bridge on every platform, and the
+ * Windows caption outside macOS, as the official DSH
  * desktop draws it (upstream apps/desktop/src/preload-windows.ts and
  * preload-menu.ts).
  *
@@ -50,7 +51,9 @@ function mark() {
 
 // The root may not exist yet when the preload runs; mark it as early as
 // possible so the client's first render already sees the caption.
-mark()
+// macOS has a native title bar and global application menu. The remote page
+// still gets the validated bridge above, without Windows layout markers.
+if (process.platform !== 'darwin') mark()
 
 function install() {
   mark()
@@ -232,5 +235,7 @@ function install() {
   }, { once: true })
 }
 
-if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', install, { once: true })
-else install()
+if (process.platform !== 'darwin') {
+  if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', install, { once: true })
+  else install()
+}

@@ -128,6 +128,13 @@ if (shell === undefined) {
     try {
       const workspace = join(home, 'work')
       mkdirSync(workspace)
+      const bin = join(home, 'bin')
+      mkdirSync(bin)
+      // /usr/bin can contain a working systemd user manager on a developer's
+      // Linux machine. It does not inherit our temporary HOME. Force the POSIX
+      // fallback instead of accidentally starting a real transient user unit.
+      const systemctl = join(bin, 'systemctl')
+      writeFileSync(systemctl, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
       const fakeDsh = join(home, 'fake-dsh')
       writeFileSync(
         fakeDsh,
@@ -148,12 +155,11 @@ if (shell === undefined) {
       const run = spawnSync(shell, ['-c', script], {
         input,
         encoding: 'utf8',
-        // Hide systemd-run even on a Linux dev box, so the nohup path is what runs.
-        env: { ...process.env, HOME: posix(home), PATH: `/usr/bin:/bin:${process.env.PATH ?? ''}` },
+        env: { ...process.env, HOME: posix(home), PATH: `${posix(bin)}:/usr/bin:/bin:${process.env.PATH ?? ''}` },
         timeout: 20_000,
       })
       assert.equal(run.status, 0, `start script failed: ${run.stderr}`)
-      assert.match(run.stdout, /^STARTED=(nohup|setsid|systemd-run)$/m)
+      assert.match(run.stdout, /^STARTED=(nohup|setsid)$/m)
 
       const logFile = join(home, '.dsh', 'dsh-ssh-desktop-3999.log')
       const deadline = Date.now() + 10_000

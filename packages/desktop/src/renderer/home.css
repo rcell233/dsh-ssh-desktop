@@ -24,6 +24,8 @@ body {
    page's caption wherever its own menubar is not (e.g. the right half of its
    "编辑"), so it steps out of the way; the DSH caption drags the window then. */
 body[data-covered] .titlebar { app-region: no-drag; }
+html[data-platform="darwin"] .titlebar { display: none; app-region: no-drag; }
+html[data-platform="darwin"] .home { padding-bottom: 0; }
 
 .home {
   flex: 1;

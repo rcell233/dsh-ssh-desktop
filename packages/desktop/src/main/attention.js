@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { Notification, nativeImage } from 'electron'
+import { Notification, app, nativeImage } from 'electron'
 
 import { taskNotification } from './policy.js'
 
@@ -145,8 +145,9 @@ export class Attention {
 
   /** The user is looking at a connection: its finished tasks are seen. */
   seen(connectionId) {
-    if (!this.unseen.delete(connectionId)) return
-    this.#render()
+    const win = this.window()
+    if (win !== undefined && !win.isDestroyed()) win.flashFrame(false)
+    if (this.unseen.delete(connectionId)) this.#render()
   }
 
   /** A connection went away: forget what it asked for. */
@@ -188,7 +189,7 @@ export class Attention {
       this.trace('notifications are not supported here')
       return
     }
-    const notification = new Notification({ title: content.title, body: content.body, silent: false, icon: NOTIFICATION_ICON })
+    const notification = new Notification({ title: content.title, body: content.body, silent: false, ...(process.platform === 'darwin' ? {} : { icon: NOTIFICATION_ICON }) })
     this.shown.add(notification)
     const release = () => { this.shown.delete(notification) }
     notification.on('click', () => {
@@ -208,9 +209,15 @@ export class Attention {
   #render() {
     const win = this.window()
     const total = this.count()
-    if (win === undefined || win.isDestroyed() || total === this.lastBadge) return
+    if (total === this.lastBadge) return
     this.lastBadge = total
     this.onCount?.(total)
+    if (process.platform !== 'win32') {
+      app.setBadgeCount(total)
+      if (total === 0 && win !== undefined && !win.isDestroyed()) win.flashFrame(false)
+      return
+    }
+    if (win === undefined || win.isDestroyed()) return
     if (total === 0) {
       win.setOverlayIcon(null, '')
       win.flashFrame(false)

@@ -31,24 +31,17 @@ try {
   electronPath = require('electron')
 } catch { /* not installed */ }
 if (typeof electronPath !== 'string' || !existsSync(electronPath)) {
-  console.log('skip smoke test (the Electron binary is not installed)')
-  process.exit(0)
+  const required = process.env.DSH_SSH_DESKTOP_REQUIRE_ELECTRON === '1'
+  console.log(`${required ? 'FAIL' : 'skip'} smoke test (the Electron binary is not installed)`)
+  process.exit(required ? 1 : 0)
 }
 
-/**
- * Chromium's own sandbox cannot start when Electron runs at Low integrity —
- * as it does from inside a workspace labelled Low by an agent sandbox (see
- * setup-electron-runtime.cmd): even `--version` dies with 0x80000003. Only
- * then is the app launched with `--no-sandbox`, and the run says so — the
- * renderer-sandbox setting is not exercised in that case.
+/** Keep the renderer sandbox enabled unless the test runner explicitly opts out.
+ * CI never opts out. A local restricted container must report that limitation.
  */
-const extraArgs = await new Promise((resolve) => {
-  const probe = spawn(electronPath, ['--version'], { stdio: 'ignore' })
-  probe.on('error', () => resolve([]))
-  probe.on('close', (code) => resolve(code === 0 ? [] : ['--no-sandbox']))
-})
+const extraArgs = process.env.DSH_SSH_DESKTOP_ALLOW_NO_SANDBOX === '1' ? ['--no-sandbox'] : []
 if (extraArgs.length > 0) {
-  console.log('note Chromium sandbox unavailable here; launching with --no-sandbox (renderer sandboxing not exercised)')
+  console.log('note explicit test override --no-sandbox (renderer sandboxing not exercised)')
 }
 
 let failures = 0
@@ -104,7 +97,11 @@ function launch() {
     let output = ''
     child.stdout.on('data', (chunk) => { output += chunk })
     child.stderr.on('data', (chunk) => { output += chunk })
-    const timer = setTimeout(() => { child.kill() }, 60_000)
+    const timer = setTimeout(() => { child.kill('SIGKILL') }, 60_000)
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      resolve({ code: null, trace: [], output: `${output}\n${String(error)}` })
+    })
     child.on('close', (code) => {
       clearTimeout(timer)
       const trace = output.split(/\r?\n/).filter((l) => l.startsWith('[smoke] ')).map((l) => l.slice(8))
@@ -138,7 +135,7 @@ await check('first launch logs in with the launch token and lands on the UI', as
   assert.match(trace, /^home covered$/m)
   assert.match(trace, /^home caption region no-drag$/m, `home caption:\n${trace}`)
   assert.deepEqual(requests().filter((r) => r.startsWith('GET / ') || r.startsWith('GET /?token')), ['GET / 401', 'GET /?token 303', 'GET / 200'])
-  assert.equal(run.code, 0, `exit code ${String(run.code)}`)
+  assert.equal(run.code, 0, `exit code ${String(run.code)}:\n${run.output}`)
   // The log file mirrors the connection log, redacted.
   const logFile = join(userData, 'logs', 'main.log')
   assert.ok(existsSync(logFile), 'logs/main.log is written')
@@ -153,6 +150,7 @@ await check('second launch reuses the persisted cookie: no token, straight to th
   rmSync(requestLog, { force: true })
   const run = await launch()
   const trace = run.trace.join('\n')
+  assert.equal(run.code, 0, `exit code ${String(run.code)}:\n${run.output}`)
   assert.match(trace, /^navigated 200 /m, `never loaded:\n${run.output}`)
   assert.equal(/^load smoke token$/m.test(trace), false, 'a restart must not need the token again')
   assert.deepEqual(requests().filter((r) => r.startsWith('GET / ') || r.startsWith('GET /?token')), ['GET / 200'])

@@ -18,15 +18,32 @@
  * @module @dsh-ssh/core/transports
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { accessSync, closeSync, constants, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { connect as netConnect } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix, win32 } from 'node:path'
 
 /** How long to wait for an SSH connection or a forward to come up. */
 const READY_TIMEOUT_MS = 25_000
+const backgroundOptionSupport = new Map()
+
+/** OpenSSH before 8.7 cannot configure forking after authentication. */
+export function supportsForkAfterAuthentication(version) {
+  const match = /OpenSSH[_\s](?:for_Windows_)?(\d+)\.(\d+)/i.exec(version)
+  return match !== null && (Number(match[1]) > 8 || (Number(match[1]) === 8 && Number(match[2]) >= 7))
+}
+
+/** Check the local executable once; -V reads no host configuration or network. */
+function canDisableBackgrounding() {
+  const command = sshCommand()
+  if (!backgroundOptionSupport.has(command)) {
+    const result = spawnSync(command, ['-V'], { encoding: 'utf8', timeout: 1_000, windowsHide: true })
+    backgroundOptionSupport.set(command, supportsForkAfterAuthentication(`${result.stdout ?? ''}\n${result.stderr ?? ''}`))
+  }
+  return backgroundOptionSupport.get(command)
+}
 
 /**
  * The ssh client to run.
@@ -36,13 +53,27 @@ const READY_TIMEOUT_MS = 25_000
  * there, which reads a different home and agent, and which dies at startup
  * inside a restricted parent (seen from Electron as
  * `NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0…): 0xC0000022`). PATH
- * is only the fallback for a system without the bundled client.
+ * is only the fallback for a system without the bundled client. macOS uses
+ * Apple's client explicitly, including its UseKeychain support, even when a
+ * Homebrew client appears first on PATH or the app was opened from Finder.
+ * @param {{ platform?: string, env?: NodeJS.ProcessEnv, executable?: (path: string) => boolean }} [options]
  * @returns {string}
  */
-export function sshCommand() {
-  if (process.platform !== 'win32') return 'ssh'
-  const bundled = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe')
-  return existsSync(bundled) ? bundled : 'ssh'
+export function sshCommand(options = {}) {
+  const platform = options.platform ?? process.platform
+  if (platform === 'darwin') return '/usr/bin/ssh'
+  if (platform !== 'win32') return 'ssh'
+  const env = options.env ?? process.env
+  const bundled = win32.join(env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe')
+  return (options.executable ?? isExecutable)(bundled) ? bundled : 'ssh'
+}
+
+/** A usable executable, not merely a path that happens to exist. */
+function isExecutable(path) {
+  try {
+    accessSync(path, constants.X_OK)
+    return statSync(path).isFile()
+  } catch { return false }
 }
 
 /**
@@ -64,6 +95,14 @@ export function baseSshArgs() {
     '-o', 'ConnectTimeout=15',
     '-o', 'ServerAliveInterval=15',
     '-o', 'ServerAliveCountMax=4',
+    // A forward must belong to the child we monitor and kill, even when the
+    // user's config normally shares connections or backgrounds clients.
+    '-o', 'ControlMaster=no',
+    '-o', 'ControlPath=none',
+    '-o', 'ControlPersist=no',
+    // Old macOS clients predate this option. Do not override IgnoreUnknown:
+    // users may need it for other settings in a shared SSH configuration.
+    ...(canDisableBackgrounding() ? ['-o', 'ForkAfterAuthentication=no'] : []),
   ]
 }
 
@@ -206,14 +245,15 @@ function inputFile(input) {
  *
  * @param {string[]} args
  * @param {import('node:child_process').StdioOptions} stdinMode
+ * @param {typeof spawn} [spawnChild]
  * @returns {{ child: import('node:child_process').ChildProcess, file: string, read: () => string, cleanup: () => void }}
  */
-function spawnToFile(args, stdinMode) {
+function spawnToFile(args, stdinMode, spawnChild = spawn) {
   const file = join(tmpdir(), `dsh-ssh-${String(process.pid)}-${randomBytes(4).toString('hex')}.log`)
-  const fd = openSync(file, 'w')
+  const fd = openSync(file, 'w', 0o600)
   let child
   try {
-    child = spawn(sshCommand(), args, { stdio: [.../** @type {any[]} */ (stdinMode), fd, fd], windowsHide: true })
+    child = spawnChild(sshCommand(), args, { stdio: [.../** @type {any[]} */ (stdinMode), fd, fd], windowsHide: true })
   } catch (error) {
     try { closeSync(fd) } catch { /* already closed */ }
     try { rmSync(file, { force: true }) } catch { /* nothing to remove */ }
@@ -293,9 +333,13 @@ export async function waitForListener(port, timeoutMs) {
 export class SystemSshTransport {
   /**
    * @param {import('./config.js').ConnectionConfig} config
+   * @param {{ spawn?: typeof spawn, readyTimeoutMs?: number }} [options] process dependencies, replaceable in tests.
    */
-  constructor(config) {
+  constructor(config, options = {}) {
     this.config = config
+    this.spawnChild = options.spawn ?? spawn
+    this.readyTimeoutMs = options.readyTimeoutMs ?? READY_TIMEOUT_MS
+    this.forwardGeneration = 0
     /** @type {import('node:child_process').ChildProcess | undefined} */
     this.forwarder = undefined
     /** @type {number | undefined} */
@@ -341,7 +385,15 @@ export class SystemSshTransport {
    * @param {(line: string) => void} [onEvent]
    */
   async startTunnel(remotePort, localPort, onEvent) {
+    if (this.forwarder !== undefined) this.dispose()
+    const generation = ++this.forwardGeneration
+    const cancelled = () => generation !== this.forwardGeneration
     const actualLocal = localPort === 0 ? remotePort : localPort
+    // A listener that predates this child is not evidence that our forward is
+    // ready. In particular, never hand the browser an unrelated local service.
+    const occupied = await probeListener(actualLocal)
+    if (cancelled()) throw new Error('the local forward was cancelled')
+    if (occupied) throw new Error(`the local port 127.0.0.1:${String(actualLocal)} is already in use`)
     const args = [
       '-N',
       '-o', 'ExitOnForwardFailure=yes',
@@ -351,7 +403,7 @@ export class SystemSshTransport {
       ...baseSshArgs(),
       this.config.target,
     ]
-    const spawned = spawnToFile(args, ['ignore'])
+    const spawned = spawnToFile(args, ['ignore'], this.spawnChild)
     const child = spawned.child
     this.forwarder = child
     this.forwarderLog = spawned
@@ -366,20 +418,48 @@ export class SystemSshTransport {
       for (const line of fresh.split(/\r?\n/)) if (line.trim() !== '') onEvent?.(`ssh: ${line.trim()}`)
     }
 
-    const deadline = Date.now() + READY_TIMEOUT_MS
     let up = false
+    let failure
+    const failed = (error) => {
+      if (failure !== undefined) return
+      failure = error
+      if (!up || this.forwarder !== child) return
+      relayNew()
+      this.forwarder = undefined
+      this.boundPort = undefined
+      this.forwarderLog = undefined
+      spawned.cleanup()
+      this.onDrop?.(error)
+    }
+    // Register before the first await: ENOENT/EACCES arrive asynchronously as
+    // error events, and an exit during startup must never be missed.
+    child.on('error', failed)
+    // Windows may keep the log locked until every child descriptor closes.
+    child.once('close', () => { relayNew(); spawned.cleanup() })
+    child.once('exit', (code, signal) => {
+      failed(new Error(`the ssh forward exited (${signal === null ? `code ${String(code)}` : `signal ${signal}`})`))
+    })
+    const running = () => !cancelled() && failure === undefined && !child.killed && child.exitCode === null && child.signalCode === null
+    const deadline = Date.now() + this.readyTimeoutMs
     while (Date.now() < deadline) {
       relayNew()
-      if (child.exitCode !== null) break
-      if (await probeListener(actualLocal)) { up = true; break }
+      if (!running()) break
+      if (await probeListener(actualLocal)) {
+        // Let pending child error/exit events run before announcing readiness.
+        await new Promise((r) => setImmediate(r))
+        if (running()) { up = true; break }
+      }
       await new Promise((r) => setTimeout(r, 250))
     }
     relayNew()
     if (!up) {
-      const detail = spawned.read().trim()
+      const detail = cancelled() ? 'the local forward was cancelled' : [failure?.message, relayed.trim()].filter(Boolean).join(': ')
       try { child.kill() } catch { /* gone */ }
-      this.forwarder = undefined
-      this.forwarderLog = undefined
+      if (this.forwarder === child) {
+        this.forwarder = undefined
+        this.boundPort = undefined
+        this.forwarderLog = undefined
+      }
       spawned.cleanup()
       throw new Error(
         `the local forward on 127.0.0.1:${String(actualLocal)} did not come up` +
@@ -387,14 +467,6 @@ export class SystemSshTransport {
       )
     }
     this.boundPort = actualLocal
-    // The forward is the only long-lived connection, so its exit is how a dropped
-    // link (network loss, sleep, server restart) becomes visible. `dispose()`
-    // clears `forwarder` first, so a deliberate teardown is not reported.
-    child.once('exit', (code) => {
-      if (this.forwarder !== child) return
-      relayNew()
-      this.onDrop?.(new Error(`the ssh forward exited (code ${String(code)})`))
-    })
     onEvent?.(`listening on 127.0.0.1:${String(actualLocal)} -> remote 127.0.0.1:${String(remotePort)} (system ssh)`)
     return { localPort: actualLocal }
   }
@@ -403,10 +475,11 @@ export class SystemSshTransport {
   get forward() {
     const child = this.forwarder
     if (child === undefined || this.boundPort === undefined) return null
-    return { localPort: this.boundPort, active: child.exitCode === null ? 1 : 0, total: 0 }
+    return { localPort: this.boundPort, active: !child.killed && child.exitCode === null && child.signalCode === null ? 1 : 0, total: 0 }
   }
 
   dispose() {
+    this.forwardGeneration += 1
     const child = this.forwarder
     this.forwarder = undefined
     this.boundPort = undefined
@@ -416,8 +489,18 @@ export class SystemSshTransport {
   }
 }
 
-/** Whether the system `ssh` client is reachable on this platform. */
-export function sshAvailable() {
-  if (process.platform !== 'win32') return true
-  return existsSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe'))
+/**
+ * Whether the selected system client is executable, including a PATH fallback.
+ * @param {{ platform?: string, env?: NodeJS.ProcessEnv, executable?: (path: string) => boolean }} [options]
+ */
+export function sshAvailable(options = {}) {
+  const platform = options.platform ?? process.platform
+  const env = options.env ?? process.env
+  const executable = options.executable ?? isExecutable
+  const command = sshCommand(options)
+  if (command !== 'ssh') return executable(command)
+  const paths = platform === 'win32' ? win32 : posix
+  const path = env.PATH ?? env.Path ?? ''
+  return path.split(paths.delimiter).filter(Boolean).some((dir) =>
+    executable(paths.join(dir, platform === 'win32' ? 'ssh.exe' : 'ssh')))
 }

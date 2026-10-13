@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const files = ['policy.js', 'connections.js', 'smoke.js', 'installer.js']
+const files = ['policy.js', 'platform.js', 'macos-ui.js', 'packaging.js', 'connections.js', 'smoke.js', 'installer.js']
 
 let failed = 0
 for (const file of files) {

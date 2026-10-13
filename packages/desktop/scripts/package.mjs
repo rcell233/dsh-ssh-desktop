@@ -1,144 +1,107 @@
-/**
- * Build the Windows installer (NSIS, per user, unsigned).
- *
- *   pnpm --filter dsh-ssh-desktop run package
- *
- * Steps:
- *  1. Make sure the server plugin tarball for the current dsh-desktop-link
- *     version exists in dist/ (packs it if not): the installer ships it, and
- *     "安装与升级" uploads it to servers.
- *  2. Stage the app in packages/desktop/.stage: src/, assets/, a package.json
- *     with no dependencies, and @dsh-ssh/core copied into node_modules as
- *     plain files. electron-builder then never walks pnpm's symlinked store.
- *  3. Run electron-builder on the stage, with the Electron already installed
- *     here (no second download of the runtime).
- *
- * Output: dist/installer/DSH-SSH-Desktop-Setup-<version>.exe
- *
- * electron-builder downloads its NSIS and resource-editing tools once, into
- * ELECTRON_BUILDER_CACHE (default: .cache/electron-builder in this repo, so a
- * confined build that cannot write %LOCALAPPDATA% still works).
- */
+/** Stage the pnpm workspace as plain files, then build native desktop packages. */
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  HELP, PRODUCT_NAME, assertBuildHost, createBuildConfig, localElectronDist,
+  macSigningOptions, parseBuildArgs, resourcesDirectory,
+} from './package-config.mjs'
 
 const require = createRequire(import.meta.url)
 const desktop = join(dirname(fileURLToPath(import.meta.url)), '..')
 const repo = join(desktop, '..', '..')
-const stage = join(desktop, '.stage')
 const dist = join(repo, 'dist')
-
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'))
-const manifest = readJson(join(desktop, 'package.json'))
-const core = join(repo, 'packages', 'core')
-const plugin = readJson(join(repo, 'packages', 'server-plugin', 'package.json'))
 
-process.env.ELECTRON_BUILDER_CACHE ??= join(repo, '.cache', 'electron-builder')
-// makensis writes its temporary files to %TEMP%. A process started from this
-// workspace can run at Low integrity (see setup-electron-runtime.cmd), which
-// cannot write there ("!tempfile: Unable to create temporary file"), so the
-// build keeps its temporary files under .cache/ too.
-const temp = join(repo, '.cache', 'tmp')
-mkdirSync(temp, { recursive: true })
-process.env.TEMP = temp
-process.env.TMP = temp
+async function main() {
+  const options = parseBuildArgs(process.argv.slice(2))
+  if (options.help) return console.log(HELP)
+  assertBuildHost(options)
+  const signing = options.platform === 'darwin' ? macSigningOptions(options.signed) : undefined
+  const manifest = readJson(join(desktop, 'package.json'))
+  const core = join(repo, 'packages', 'core')
+  const plugin = readJson(join(repo, 'packages', 'server-plugin', 'package.json'))
+  process.env.ELECTRON_BUILDER_CACHE ??= join(repo, '.cache', 'electron-builder')
+  // Work around Windows Low integrity workspaces, without changing Mac TMPDIR.
+  if (process.platform === 'win32') {
+    const temp = join(repo, '.cache', 'tmp')
+    mkdirSync(temp, { recursive: true })
+    process.env.TEMP = temp
+    process.env.TMP = temp
+  }
 
-// ------------------------------------------------------------ 1. the plugin
-const pluginFile = join(dist, `dsh-desktop-link-${String(plugin.version)}.tgz`)
-if (!existsSync(pluginFile)) {
   const pnpm = process.env.npm_execpath
-  if (pnpm === undefined) throw new Error(`${pluginFile} is missing; run this through pnpm, or pnpm pack packages/server-plugin into dist/`)
-  console.log(`packing dsh-desktop-link ${String(plugin.version)}`)
+  if (!pnpm) throw new Error('Run packaging through pnpm: pnpm package:mac or pnpm package:win.')
+  mkdirSync(dist, { recursive: true })
+  const pluginFile = join(dist, `dsh-desktop-link-${String(plugin.version)}.tgz`)
+  // Rebuild every time: the source can change without a plugin version bump.
+  rmSync(pluginFile, { force: true })
   const packed = spawnSync(process.execPath, [pnpm, 'pack', '--pack-destination', dist], {
-    cwd: join(repo, 'packages', 'server-plugin'),
-    stdio: 'inherit',
+    cwd: join(repo, 'packages', 'server-plugin'), stdio: 'inherit',
   })
-  if (packed.status !== 0 || !existsSync(pluginFile)) throw new Error('packing the server plugin failed')
+  if (packed.error || packed.status !== 0 || !existsSync(pluginFile)) throw new Error('Packing the server plugin failed.', { cause: packed.error })
+
+  const electronPackage = dirname(require.resolve('electron/package.json'))
+  const electronVersion = readJson(join(electronPackage, 'package.json')).version
+  const runtime = join(electronPackage, 'dist')
+  const localDist = existsSync(runtime) ? realpathSync(runtime) : undefined
+  const { build, Platform, Arch } = require('electron-builder')
+  const builderRequire = createRequire(require.resolve('electron-builder'))
+  const appBuilderRequire = createRequire(builderRequire.resolve('app-builder-lib'))
+  const { extractFile } = appBuilderRequire('@electron/asar')
+  const targetPlatform = options.platform === 'darwin' ? Platform.MAC : Platform.WINDOWS
+  const targetTypes = options.dir ? ['dir'] : options.platform === 'darwin' ? ['dmg', 'zip'] : ['nsis']
+  const results = []
+
+  for (const arch of options.architectures) {
+    const stage = join(desktop, '.stage', `${options.platform}-${arch}`)
+    rmSync(stage, { recursive: true, force: true })
+    mkdirSync(stage, { recursive: true })
+    cpSync(join(desktop, 'src'), join(stage, 'src'), { recursive: true })
+    mkdirSync(join(stage, 'assets'))
+    for (const file of ['icon.ico', 'icon.png', 'icon-256.png', 'installer.nsh', 'trayTemplate.png', 'trayTemplate@2x.png']) {
+      cpSync(join(desktop, 'assets', file), join(stage, 'assets', file))
+    }
+    for (const file of ['LICENSE', 'NOTICE']) cpSync(join(repo, file), join(stage, file))
+    const coreTarget = join(stage, 'node_modules', '@dsh-ssh', 'core')
+    mkdirSync(coreTarget, { recursive: true })
+    cpSync(join(core, 'lib'), join(coreTarget, 'lib'), { recursive: true })
+    cpSync(join(core, 'package.json'), join(coreTarget, 'package.json'))
+    writeFileSync(join(stage, 'package.json'), `${JSON.stringify({
+      name: manifest.name, productName: PRODUCT_NAME, version: manifest.version,
+      description: manifest.description, type: 'module', main: manifest.main,
+      license: manifest.license, author: PRODUCT_NAME,
+      dependencies: { '@dsh-ssh/core': readJson(join(core, 'package.json')).version },
+      // The stage has real files, not pnpm symlinks: do not ask pnpm to list it.
+      packageManager: 'traversal@1.0.0',
+    }, null, 2)}\n`)
+
+    const config = createBuildConfig({
+      desktop, dist, pluginFile, pluginVersion: plugin.version,
+      electronVersion, platform: options.platform, signing,
+    })
+    const electronDist = localElectronDist(options.platform, arch, process, localDist)
+    if (electronDist) config.electronDist = electronDist
+    config.afterPack = async (context) => {
+      const resources = resourcesDirectory(context.appOutDir, context.electronPlatformName, context.packager.appInfo.productFilename)
+      rmSync(join(resources, 'default_app.asar'), { force: true })
+      // Check the actual archive, including the manually staged core dependency.
+      for (const file of [manifest.main, 'node_modules/@dsh-ssh/core/lib/index.js', 'assets/trayTemplate.png', 'assets/trayTemplate@2x.png', 'LICENSE', 'NOTICE']) {
+        if (extractFile(join(resources, 'app.asar'), file).length === 0) throw new Error(`Empty packaged file: ${file}`)
+      }
+      if (!readFileSync(join(resources, `dsh-desktop-link-${String(plugin.version)}.tgz`)).equals(readFileSync(pluginFile))) {
+        throw new Error('Packaged server plugin does not match the freshly built tarball.')
+      }
+    }
+    results.push(...await build({ targets: targetPlatform.createTarget(targetTypes, Arch[arch]), projectDir: stage, config }))
+  }
+  console.log('\nbuilt:')
+  for (const file of results) console.log(`  ${file}`)
 }
 
-// --------------------------------------------------------------- 2. stage
-rmSync(stage, { recursive: true, force: true })
-mkdirSync(stage, { recursive: true })
-cpSync(join(desktop, 'src'), join(stage, 'src'), { recursive: true })
-mkdirSync(join(stage, 'assets'))
-for (const file of ['icon.ico', 'icon.png', 'icon-256.png', 'installer.nsh']) cpSync(join(desktop, 'assets', file), join(stage, 'assets', file))
-const coreTarget = join(stage, 'node_modules', '@dsh-ssh', 'core')
-mkdirSync(coreTarget, { recursive: true })
-cpSync(join(core, 'lib'), join(coreTarget, 'lib'), { recursive: true })
-cpSync(join(core, 'package.json'), join(coreTarget, 'package.json'))
-writeFileSync(join(stage, 'package.json'), `${JSON.stringify({
-  name: manifest.name,
-  productName: 'DSH SSH Desktop',
-  version: manifest.version,
-  description: manifest.description,
-  type: 'module',
-  main: manifest.main,
-  license: manifest.license,
-  author: 'DSH SSH Desktop',
-  dependencies: { '@dsh-ssh/core': readJson(join(core, 'package.json')).version },
-  // A plain folder, not a pnpm project: electron-builder must read its
-  // node_modules as they lie, not ask a package manager (pnpm's `list` fails
-  // on the stage, and the Node used here ships no npm).
-  packageManager: 'traversal@1.0.0',
-}, null, 2)}\n`)
-
-// ----------------------------------------------------------- 3. the build
-const electronPackage = dirname(require.resolve('electron/package.json'))
-const electronVersion = readJson(join(electronPackage, 'package.json')).version
-const { build, Platform } = require('electron-builder')
-
-const result = await build({
-  targets: Platform.WINDOWS.createTarget(['nsis'], 1 /* x64 */),
-  projectDir: stage,
-  config: {
-    appId: 'dsh-ssh-desktop',
-    productName: 'DSH SSH Desktop',
-    executableName: 'DSH SSH Desktop',
-    copyright: 'DSH SSH Desktop',
-    electronVersion,
-    electronDist: realpathSync(join(electronPackage, 'dist')),
-    directories: { output: join(dist, 'installer'), buildResources: 'assets' },
-    files: ['src/**/*', 'assets/**/*', '!assets/installer.nsh', 'node_modules/**/*', 'package.json'],
-    asar: true,
-    npmRebuild: false,
-    nodeGypRebuild: false,
-    extraResources: [
-      // The installer ships the server plugin; the app finds it by this name.
-      { from: pluginFile, to: `dsh-desktop-link-${String(plugin.version)}.tgz` },
-      // Toasts need an icon Windows can read, not a path inside app.asar.
-      { from: join(desktop, 'assets', 'icon-256.png'), to: 'icon-256.png' },
-    ],
-    // Copied along with the local Electron: its sample app, which this one replaces.
-    afterPack: async (context) => {
-      rmSync(join(context.appOutDir, 'resources', 'default_app.asar'), { force: true })
-    },
-    publish: null,
-    win: {
-      icon: 'assets/icon.ico',
-      artifactName: 'DSH-SSH-Desktop-Setup-${version}.${ext}',
-    },
-    nsis: {
-      oneClick: false,
-      perMachine: false,
-      allowToChangeInstallationDirectory: true,
-      createDesktopShortcut: true,
-      createStartMenuShortcut: true,
-      shortcutName: 'DSH SSH Desktop',
-      installerIcon: 'assets/icon.ico',
-      uninstallerIcon: 'assets/icon.ico',
-      // Names the updater folder after the product (see the file).
-      include: 'assets/installer.nsh',
-      installerLanguages: ['zh_CN'],
-      language: '2052',
-      // Saved connections and login cookies stay unless the user deletes them.
-      deleteAppDataOnUninstall: false,
-      runAfterFinish: true,
-    },
-  },
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : error)
+  process.exitCode = 1
 })
-
-console.log('\nbuilt:')
-for (const file of result) console.log(`  ${file}`)
